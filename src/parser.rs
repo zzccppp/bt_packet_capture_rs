@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use etherparse::SlicedPacket;
 use pcap::stream::{PacketCodec, PacketStream};
 use pcap::{Active, Capture, Device, Error, Packet};
-use tracing::warn;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct TimeVal {
@@ -18,13 +18,13 @@ pub struct SimpleParsedPacket {
     pub timeval: TimeVal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InetAddr {
     Ipv4(Ipv4Addr),
     Ipv6(Ipv6Addr),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TransportProtocol {
     Tcp,
     Udp,
@@ -40,6 +40,24 @@ pub struct PacketQuadruple {
 }
 
 impl PacketQuadruple {
+    pub fn get_src_dst_tuple(&self) -> (InetAddr, u16, InetAddr, u16) {
+        (
+            self.src_ip.clone(),
+            self.src_port,
+            self.dst_ip.clone(),
+            self.dst_port,
+        )
+    }
+
+    pub fn get_dst_src_tuple(&self) -> (InetAddr, u16, InetAddr, u16) {
+        (
+            self.dst_ip.clone(),
+            self.dst_port,
+            self.src_ip.clone(),
+            self.src_port,
+        )
+    }
+
     pub fn from_sliced_packet(p: &SlicedPacket) -> Result<Self, &'static str> {
         let mut inf = Self {
             src_port: 0,
@@ -112,11 +130,11 @@ impl PacketCodec for SimpleDumpCodec {
                 })
             } else {
                 let error = info.unwrap_err();
-                warn!("{}", error);
+                // warn!("{}", error);
                 Err(Error::PcapError(error.to_string()))
             }
         } else {
-            warn!("Failed to decode packet {:?}", packet);
+            // warn!("Failed to decode packet {:?}", packet);
             Err(Error::PcapError("Failed to decode packet".to_string()))
         }
         // Ok(format!("{:?}", packet))
@@ -124,10 +142,11 @@ impl PacketCodec for SimpleDumpCodec {
 }
 
 pub async fn start_new_stream(device: Device) -> PacketStream<Active, SimpleDumpCodec> {
-    println!("Using device {}", device.name);
+    info!("Using device {}", device.name);
 
     let cap = Capture::from_device(device)
         .unwrap()
+        .buffer_size(1024 * 1024 * 64)
         .immediate_mode(true)
         .open()
         .unwrap()
