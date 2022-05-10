@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use crate::parser::{SimpleDumpCodec, SimpleParsedPacket};
 use flow::FlowCollections;
 use futures::StreamExt;
@@ -5,15 +8,17 @@ use inquire::{Select, Text};
 use parser::start_new_stream;
 use pcap::stream::PacketCodec;
 use pcap::{Capture, Device};
+use tokio::select;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::sleep;
 use tracing::info;
 
 pub mod flow;
 pub mod parser;
 
 fn main() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
         .build()
         .unwrap();
 
@@ -38,21 +43,26 @@ fn main() {
 
     let h1 = rt.spawn(async move {
         //receive the tcp packets to analysis flow
-        let mut rx = tcp_rx;
-        let mut flows = FlowCollections::new();
-        while let Some(packet) = rx.recv().await {
-            flows.insert_packet(packet);
+        let mut tcp_rx = tcp_rx;
+        let mut udp_rx = udp_rx;
+        let mut tcp_flow_collections = FlowCollections::new();
+        let mut udp_flow_collections = FlowCollections::new();
+        loop {
+            select! {
+                Some(tcp_recv) = tcp_rx.recv() => {
+                    tcp_flow_collections.insert_packet(tcp_recv);
+                },
+                Some(udp_recv) = udp_rx.recv() => {
+                    udp_flow_collections.insert_packet(udp_recv);
+                },
+                else => {break;},
+            };
         }
-        // println!("{:?}", flows);
+        println!("tcp_flow: {:?}", tcp_flow_collections);
     });
 
-    let h2 = rt.spawn(async move {
-        //receive the udp packets to analysis flow
-        let mut rx = udp_rx;
-        let mut flows = FlowCollections::new();
-        while let Some(packet) = rx.recv().await {
-            flows.insert_packet(packet);
-        }
+    let analysis_handle = rt.spawn(async move {
+        sleep(Duration::from_millis(1000)).await;
     });
 
     if index == device_list_name.len() - 1 {
@@ -98,7 +108,8 @@ fn main() {
 
     rt.block_on(async {
         h1.await.unwrap();
-        h2.await.unwrap();
+        // h2.await.unwrap();
+        analysis_handle.await.unwrap();
     });
 
     info!("Finished analysis packets");

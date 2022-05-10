@@ -124,8 +124,8 @@ impl PacketCodec for SimpleDumpCodec {
                     payload: payload.to_vec(),
                     info,
                     timeval: TimeVal {
-                        tv_sec: packet.header.ts.tv_sec,
-                        tv_usec: packet.header.ts.tv_usec,
+                        tv_sec: packet.header.ts.tv_sec as i64,
+                        tv_usec: packet.header.ts.tv_usec as i64,
                     },
                 })
             } else {
