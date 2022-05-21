@@ -5,6 +5,8 @@ use pcap::stream::{PacketCodec, PacketStream};
 use pcap::{Active, Capture, Device, Error, Packet};
 use tracing::{info, warn};
 
+use crate::flow::Flow;
+
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct TimeVal {
     pub tv_sec: i64,
@@ -154,4 +156,28 @@ pub async fn start_new_stream(device: Device) -> PacketStream<Active, SimpleDump
         .unwrap();
     let stream = cap.stream(SimpleDumpCodec {}).unwrap();
     stream
+}
+
+#[derive(Debug, Clone)]
+pub struct TcpFlowParser {}
+
+impl TcpFlowParser {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn parse_flow(&mut self, flow: Flow) {
+        info!("{:?}", flow);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UdpFlowParser {}
+
+impl UdpFlowParser {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn parse_flow(&mut self, flow: Flow) {}
 }

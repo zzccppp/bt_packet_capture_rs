@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::collections::HashMap;
 
 use crate::parser::{InetAddr, PacketQuadruple, SimpleParsedPacket};
 
@@ -27,6 +27,12 @@ impl FlowCollections {
         let mut flow = Flow::new(&info);
         flow.insert_packet(packet);
         self.flows.insert(info.get_src_dst_tuple(), flow);
+    }
+
+    pub fn clear_flows(
+        &mut self,
+    ) -> std::collections::hash_map::Drain<'_, (InetAddr, u16, InetAddr, u16), Flow> {
+        return self.flows.drain();
     }
 }
 
