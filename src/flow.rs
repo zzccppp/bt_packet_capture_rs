@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::parser::{InetAddr, PacketQuadruple, SimpleParsedPacket};
+use crate::parser::{InetAddr, PacketQuadruple, SimpleParsedPacket, TimeVal};
 
 #[derive(Debug)]
 pub struct FlowCollections {
@@ -53,4 +53,24 @@ impl Flow {
     pub fn insert_packet(&mut self, packet: SimpleParsedPacket) {
         self.packets.push(packet);
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum UdpPeerPacketEnum {
+    RawBencode,
+    Utp,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct UdpPeerPacket {
+    pub data: UdpPeerPacketEnum,
+    pub timeval: TimeVal,
+    pub info: PacketQuadruple,
+}
+
+#[derive(Debug, Clone)]
+pub struct UdpPeerFlow {
+    pub packets: Vec<UdpPeerPacket>,
+    pub info: PacketQuadruple,
 }
