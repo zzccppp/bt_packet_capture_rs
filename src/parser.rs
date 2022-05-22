@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use crate::flow::Flow;
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct TimeVal {
     pub tv_sec: i64,
     pub tv_usec: i64,
@@ -166,9 +166,7 @@ impl TcpFlowParser {
         Self {}
     }
 
-    pub fn parse_flow(&mut self, flow: Flow) {
-        info!("{:?}", flow);
-    }
+    pub fn parse_flow(&mut self, flow: Flow) {}
 }
 
 #[derive(Debug, Clone)]
@@ -179,5 +177,16 @@ impl UdpFlowParser {
         Self {}
     }
 
-    pub fn parse_flow(&mut self, flow: Flow) {}
+    pub fn parse_flow(&mut self, flow: Flow) {
+        let mut flow = flow;
+        flow.packets.sort_by(|x, y| {
+            return x.timeval.cmp(&y.timeval);
+        });
+        for p in flow.packets.iter() {
+            let re = bende::decode::<bende::Value>(p.payload.as_slice());
+            if let Ok(val) = re {
+                info!("{}", val);
+            }
+        }
+    }
 }

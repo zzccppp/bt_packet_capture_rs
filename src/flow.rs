@@ -38,8 +38,8 @@ impl FlowCollections {
 
 #[derive(Debug, Clone)]
 pub struct Flow {
-    packets: Vec<SimpleParsedPacket>,
-    info: PacketQuadruple,
+    pub packets: Vec<SimpleParsedPacket>,
+    pub info: PacketQuadruple,
 }
 
 impl Flow {

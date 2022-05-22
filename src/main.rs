@@ -16,6 +16,7 @@ use tracing::info;
 
 pub mod flow;
 pub mod parser;
+pub mod bencode;
 
 fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
