@@ -5,7 +5,7 @@ use pcap::stream::{PacketCodec, PacketStream};
 use pcap::{Active, Capture, Device, Error, Packet};
 use tracing::{info, warn};
 
-use crate::flow::Flow;
+use crate::flow::{Flow, UdpPeerFlow};
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct TimeVal {
@@ -170,11 +170,13 @@ impl TcpFlowParser {
 }
 
 #[derive(Debug, Clone)]
-pub struct UdpFlowParser {}
+pub struct UdpFlowParser {
+    pub peer_flows: Vec<UdpPeerFlow>,
+}
 
 impl UdpFlowParser {
     pub fn new() -> Self {
-        Self {}
+        Self { peer_flows: vec![] }
     }
 
     pub fn parse_flow(&mut self, flow: Flow) {
@@ -184,8 +186,11 @@ impl UdpFlowParser {
         });
         for p in flow.packets.iter() {
             let re = bende::decode::<bende::Value>(p.payload.as_slice());
-            if let Ok(val) = re {
-                info!("{}", val);
+            // if there is valid bencode udp packet
+            if let Ok(_) = re {
+                let peer_flow = UdpPeerFlow::from_flow(&flow);
+                // info!("{:?}", peer_flow);
+                self.peer_flows.push(peer_flow);
             }
         }
     }
