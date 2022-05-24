@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::{SystemTime, SystemTimeError};
 
 use etherparse::SlicedPacket;
 use pcap::stream::{PacketCodec, PacketStream};
@@ -171,16 +173,40 @@ impl TcpFlowParser {
 
 #[derive(Debug, Clone)]
 pub struct UdpFlowParser {
-    pub peer_flows: Vec<UdpPeerFlow>,
+    pub peer_flows: HashMap<(InetAddr, u16, InetAddr, u16), UdpPeerFlow>,
+    pub create_time: HashMap<(InetAddr, u16, InetAddr, u16), SystemTime>,
 }
 
 impl UdpFlowParser {
     pub fn new() -> Self {
-        Self { peer_flows: vec![] }
+        Self {
+            peer_flows: HashMap::new(),
+            create_time: HashMap::new(),
+        }
+    }
+
+    pub fn clean_useless_flow(&mut self) {
+        // 这里依据flow的analysis执行时间以及结果决定是否删除对应的flow以及结果项释放内存
     }
 
     pub fn parse_flow(&mut self, flow: Flow) {
         let mut flow = flow;
+
+        // 如果能在Parser存储的UdpPeerFlow中找到该四元组，那么就将新的数据包加进去
+        if let Some(e) = self.peer_flows.get_mut(&flow.info.get_src_dst_tuple()) {
+            info!("add packets to known udp flow {:?}", flow.info);
+            e.add_packets(&flow);
+            e.analysis();
+            return;
+        }
+
+        if let Some(e) = self.peer_flows.get_mut(&flow.info.get_dst_src_tuple()) {
+            info!("add packets to known udp flow {:?}", flow.info);
+            e.add_packets(&flow);
+            e.analysis();
+            return;
+        }
+
         flow.packets.sort_by(|x, y| {
             return x.timeval.cmp(&y.timeval);
         });
@@ -192,9 +218,13 @@ impl UdpFlowParser {
             let re = bende::decode::<bende::Value>(p.payload.as_slice());
             // if there is valid bencode udp packet
             if let Ok(_) = re {
-                let peer_flow = UdpPeerFlow::from_flow(&flow);
-                // info!("{:?}", peer_flow);
-                self.peer_flows.push(peer_flow);
+                let mut peer_flow = UdpPeerFlow::from_flow(&flow);
+                peer_flow.analysis();
+                info!("create interested udp flow {:?}", peer_flow.info);
+                self.create_time
+                    .insert(peer_flow.info.get_src_dst_tuple(), SystemTime::now());
+                self.peer_flows
+                    .insert(peer_flow.info.get_src_dst_tuple(), peer_flow);
                 return;
             }
         }

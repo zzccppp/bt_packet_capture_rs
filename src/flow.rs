@@ -1,7 +1,8 @@
-use std::{collections::HashMap, io::Cursor};
+use std::{cmp::Ordering, collections::HashMap, hash::Hash, io::Cursor};
 
-use bytes::Buf;
-use tracing::info;
+use bytes::{Buf, BufMut, BytesMut};
+use serde::Serialize;
+use tracing::{info, instrument};
 
 use crate::parser::{InetAddr, PacketQuadruple, SimpleParsedPacket, TimeVal};
 
@@ -70,32 +71,19 @@ pub struct UtpPacket {
     pub type_ver: u8,
     pub connid: u16,
     pub payload: Vec<u8>,
+    pub seq: u16,
 }
 
 impl UtpPacket {
-    pub fn new(type_ver: u8, connid: u16, payload: &[u8]) -> Self {
+    pub fn new(type_ver: u8, connid: u16, seq: u16, payload: &[u8]) -> Self {
         Self {
             type_ver,
             connid,
+            seq,
             payload: payload.to_vec(),
         }
     }
 }
-
-#[derive(Debug, Clone)]
-pub enum UtpPayload {
-    Bittorrent(BittorrentPacket),
-    Other(Vec<u8>),
-}
-
-impl UtpPayload {
-    pub fn from_slice(data: &[u8]) -> Self {
-        UtpPayload::Other(data.to_vec())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct BittorrentPacket {}
 
 #[derive(Debug, Clone)]
 pub struct UdpPeerPacket {
@@ -166,10 +154,14 @@ impl UdpPeerPacket {
                             }
                             temp
                         };
+                        let seq_slice = [slice[16], slice[17]];
+                        let mut buf = Cursor::new(seq_slice);
+                        let seq = buf.get_u16();
                         if payload_start != 0 {
                             data = UdpPeerPacketEnum::Utp(UtpPacket::new(
                                 slice[0],
                                 conn_id,
+                                seq,
                                 &slice[payload_start..],
                             ));
                         }
@@ -187,10 +179,75 @@ impl UdpPeerPacket {
 }
 
 #[derive(Debug, Clone)]
+pub enum BitTorrentMessage {
+    HandShake {
+        info_hash: Vec<u8>,
+        peer_id: Vec<u8>,
+    },
+    Choke,         //no payload
+    Unchoke,       //no payload
+    Interested,    //no payload
+    NotInterested, //no payload
+    Have {
+        idx: u32,
+    },
+    Bitfield {
+        bitfield: Vec<u8>,
+    }, //not interested
+    Request {
+        piece_index: u32,
+        begin_piece_offset: u32,
+        piece_length: u32,
+    },
+    Piece {
+        piece_index: u32,
+        begin_piece_offset: u32,
+        data: Vec<u8>,
+    },
+    Cancel {
+        piece_index: u32,
+        begin_piece_offset: u32,
+        piece_length: u32,
+    },
+    Port, //DHT Extension 0x09
+    /*
+        0x0D   suggest
+        0x0E   have all
+        0x0F   have none
+        0x10   reject request
+        0x11   allowed fast
+    */
+    Suggest,
+    HaveAll,
+    HaveNone,
+    RejectRequest,
+    AllowedFast,
+    // 0x14
+    Extended {
+        data: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct BittorrentFlow {
+    pub conn_id1: u16,
+    pub conn_id2: u16,
+    pub messages1: Vec<BitTorrentMessage>,
+    pub messages2: Vec<BitTorrentMessage>,
+    pub info_hash: Option<Vec<u8>>, // 如果没有，则证明没有找到握手信息
+}
+
+pub fn parse_utp_to_bittorrent(packets: Vec<&UdpPeerPacket>) {
+    let mut buf = BytesMut::with_capacity(64);
+    for &p in packets.iter() {}
+}
+
+#[derive(Debug, Clone)]
 pub struct UdpPeerFlow {
     pub packets: Vec<UdpPeerPacket>,
     pub info: PacketQuadruple,
     // start_timeval end_timeval
+    pub utp_binary_flow: HashMap<u16, (BytesMut, BytesMut)>,
 }
 
 impl UdpPeerFlow {
@@ -202,6 +259,124 @@ impl UdpPeerFlow {
         Self {
             packets: peer_packets,
             info: flow.info.clone(),
+            utp_binary_flow: HashMap::new(),
         }
+    }
+
+    pub fn add_packets(&mut self, flow: &Flow) {
+        for p in flow.packets.iter() {
+            self.packets.push(UdpPeerPacket::from_simple_packet(p));
+        }
+        self.packets.sort_by(|x, y| x.timeval.cmp(&y.timeval));
+    }
+
+    // #[instrument]
+    pub fn analysis(&mut self) {
+        let utp_packet: Vec<&UdpPeerPacket> = self
+            .packets
+            .iter()
+            .filter(|x| match x.data {
+                UdpPeerPacketEnum::Utp(_) => true,
+                _ => false,
+            })
+            .collect();
+        if utp_packet.len() == 0 {
+            // 筛选出有价值的utp对话
+            return;
+        }
+        let mut conn_ids: Vec<u16> = utp_packet
+            .iter()
+            .map(|x| {
+                if let UdpPeerPacketEnum::Utp(e) = &x.data {
+                    return e.connid;
+                }
+                return 0;
+            })
+            .collect();
+        conn_ids.sort();
+        conn_ids.dedup();
+        if conn_ids.is_empty() || conn_ids.len() < 2 {
+            return;
+        }
+        //get paired connid
+        let mut paired_connid: Vec<(u16, u16)> = vec![];
+        for i in (0..(conn_ids.len() / 2 * 2)).step_by(2) {
+            if conn_ids[i] == conn_ids[i + 1] - 1 {
+                paired_connid.push((conn_ids[i], conn_ids[i + 1]))
+            }
+        }
+        for (connid1, connid2) in paired_connid {
+            let mut packets1: Vec<&UdpPeerPacket> = vec![];
+            let mut packets2: Vec<&UdpPeerPacket> = vec![];
+            for &x in utp_packet.iter() {
+                if let UdpPeerPacketEnum::Utp(e) = &x.data {
+                    if e.connid == connid1 && e.type_ver == 0x01 {
+                        packets1.push(x);
+                    } else if e.connid == connid2 && e.type_ver == 0x01 {
+                        packets2.push(x);
+                    }
+                }
+            }
+            packets1.sort_by(|x, y| {
+                if let UdpPeerPacketEnum::Utp(e1) = &x.data {
+                    if let UdpPeerPacketEnum::Utp(e2) = &y.data {
+                        return e1.seq.cmp(&e2.seq);
+                    }
+                }
+                return Ordering::Equal;
+            });
+            packets1.dedup_by(|x, y| {
+                if let UdpPeerPacketEnum::Utp(e1) = &x.data {
+                    if let UdpPeerPacketEnum::Utp(e2) = &y.data {
+                        return e1.seq.eq(&e2.seq);
+                    }
+                }
+                return false;
+            });
+            packets2.sort_by(|x, y| {
+                if let UdpPeerPacketEnum::Utp(e1) = &x.data {
+                    if let UdpPeerPacketEnum::Utp(e2) = &y.data {
+                        return e1.seq.cmp(&e2.seq);
+                    }
+                }
+                return Ordering::Equal;
+            });
+            packets2.dedup_by(|x, y| {
+                if let UdpPeerPacketEnum::Utp(e1) = &x.data {
+                    if let UdpPeerPacketEnum::Utp(e2) = &y.data {
+                        return e1.seq.eq(&e2.seq);
+                    }
+                }
+                return false;
+            });
+
+            if let Some(e) = self.utp_binary_flow.get_mut(&connid1) {
+                for p in packets1 {
+                    if let UdpPeerPacketEnum::Utp(d) = &p.data {
+                        e.0.extend_from_slice(d.payload.as_slice());
+                    }
+                }
+                for p in packets2 {
+                    if let UdpPeerPacketEnum::Utp(d) = &p.data {
+                        e.1.extend_from_slice(d.payload.as_slice());
+                    }
+                }
+            } else {
+                let mut e0 = BytesMut::with_capacity(64);
+                let mut e1 = BytesMut::with_capacity(64);
+                for p in packets1 {
+                    if let UdpPeerPacketEnum::Utp(d) = &p.data {
+                        e0.extend_from_slice(d.payload.as_slice());
+                    }
+                }
+                for p in packets2 {
+                    if let UdpPeerPacketEnum::Utp(d) = &p.data {
+                        e1.extend_from_slice(d.payload.as_slice());
+                    }
+                }
+                self.utp_binary_flow.insert(connid1, (e0, e1));
+            }
+        }
+        self.packets.clear();
     }
 }
