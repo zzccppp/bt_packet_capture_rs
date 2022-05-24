@@ -1,6 +1,3 @@
-use std::sync::Arc;
-use std::time::Duration;
-
 use crate::flow::Flow;
 use crate::parser::{SimpleDumpCodec, SimpleParsedPacket, TcpFlowParser, UdpFlowParser};
 use flow::FlowCollections;
@@ -9,14 +6,14 @@ use inquire::{Select, Text};
 use parser::start_new_stream;
 use pcap::stream::PacketCodec;
 use pcap::{Capture, Device};
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::sleep;
+use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::{select, time};
 use tracing::info;
 
+pub mod bencode;
 pub mod flow;
 pub mod parser;
-pub mod bencode;
 
 fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -58,8 +55,8 @@ fn main() {
         //receive the tcp packets to analysis flow
         let mut tcp_rx = tcp_rx;
         let mut udp_rx = udp_rx;
-        let mut tcp_flow_tx = tcp_flow_tx;
-        let mut udp_flow_tx = udp_flow_tx;
+        let tcp_flow_tx = tcp_flow_tx;
+        let udp_flow_tx = udp_flow_tx;
         let mut tcp_flow_collections = FlowCollections::new();
         let mut udp_flow_collections = FlowCollections::new();
         let mut interval = time::interval(Duration::from_millis(1000));
@@ -73,10 +70,12 @@ fn main() {
                 },
                 _ = interval.tick() => {
                     let flows = tcp_flow_collections.clear_flows();
+                    tracing::debug!("Sending {} tcp flows", flows.len());
                     for (_k, v) in flows {
                         tcp_flow_tx.send(v).await.unwrap();
                     }
                     let flows = udp_flow_collections.clear_flows();
+                    tracing::debug!("Sending {} udp flows", flows.len());
                     for (_k, v) in flows {
                         udp_flow_tx.send(v).await.unwrap();
                     }

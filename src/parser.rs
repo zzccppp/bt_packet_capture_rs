@@ -185,12 +185,17 @@ impl UdpFlowParser {
             return x.timeval.cmp(&y.timeval);
         });
         for p in flow.packets.iter() {
+            // 这里需要检测不同的特征，如果特征成立，则送去分析Bt协议
+            // TODO: 字符串匹配 0x13 BitTorrent protocol
+
+            // 特征：UDP报文直接承载bencode流
             let re = bende::decode::<bende::Value>(p.payload.as_slice());
             // if there is valid bencode udp packet
             if let Ok(_) = re {
                 let peer_flow = UdpPeerFlow::from_flow(&flow);
                 // info!("{:?}", peer_flow);
                 self.peer_flows.push(peer_flow);
+                return;
             }
         }
     }

@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, io::Cursor};
 
+use bytes::Buf;
 use tracing::info;
 
 use crate::parser::{InetAddr, PacketQuadruple, SimpleParsedPacket, TimeVal};
@@ -60,7 +61,7 @@ impl Flow {
 #[derive(Debug, Clone)]
 pub enum UdpPeerPacketEnum {
     RawBencode(bende::Value),
-    Utp,
+    Utp(UtpPacket),
     Other,
 }
 
@@ -68,17 +69,29 @@ pub enum UdpPeerPacketEnum {
 pub struct UtpPacket {
     pub type_ver: u8,
     pub connid: u16,
-    pub payload: UtpPayload,
+    pub payload: Vec<u8>,
 }
 
 impl UtpPacket {
-    
+    pub fn new(type_ver: u8, connid: u16, payload: &[u8]) -> Self {
+        Self {
+            type_ver,
+            connid,
+            payload: payload.to_vec(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum UtpPayload {
     Bittorrent(BittorrentPacket),
     Other(Vec<u8>),
+}
+
+impl UtpPayload {
+    pub fn from_slice(data: &[u8]) -> Self {
+        UtpPayload::Other(data.to_vec())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +109,7 @@ impl UdpPeerPacket {
         let bencode = bende::decode::<bende::Value>(p.payload.as_slice());
         let mut data = UdpPeerPacketEnum::Other;
         if let Ok(val) = bencode {
-            info!("{:?}", val);
+            // info!("{:?}", val);
             data = UdpPeerPacketEnum::RawBencode(val);
         } else {
             // try to parse the utp protocol
@@ -120,7 +133,47 @@ impl UdpPeerPacket {
             if slice.len() > 20 {
                 // greater than utp header length
                 match slice[0] {
-                    0x01 | 0x11 | 0x21 | 0x31 | 0x41 => {}
+                    0x01 | 0x11 | 0x21 | 0x31 | 0x41 => {
+                        let conn_id_slice = [slice[2], slice[3]];
+                        let mut buf = Cursor::new(conn_id_slice);
+                        let conn_id = buf.get_u16();
+                        let payload_start = if slice[1] == 0 {
+                            20usize
+                        } else {
+                            // process the extensions
+                            /*
+                            0               8               16
+                            +---------------+---------------+
+                            | extension     | len           |
+                            +---------------+---------------+
+                            */
+                            let mut temp = 20usize;
+                            let len = slice.len();
+                            loop {
+                                if len < temp + 2 {
+                                    temp = 0;
+                                    break;
+                                }
+                                if len < temp + 2 + slice[temp + 1] as usize {
+                                    temp = 0;
+                                    break;
+                                }
+                                if slice[temp] == 0 {
+                                    temp += 2 + slice[temp + 1] as usize;
+                                    break;
+                                }
+                                temp += 2 + slice[temp + 1] as usize;
+                            }
+                            temp
+                        };
+                        if payload_start != 0 {
+                            data = UdpPeerPacketEnum::Utp(UtpPacket::new(
+                                slice[0],
+                                conn_id,
+                                &slice[payload_start..],
+                            ));
+                        }
+                    }
                     _ => {}
                 }
             }
