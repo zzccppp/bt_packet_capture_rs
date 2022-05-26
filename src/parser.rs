@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{SystemTime, SystemTimeError};
 
+use aho_corasick::AhoCorasick;
 use etherparse::SlicedPacket;
 use pcap::stream::{PacketCodec, PacketStream};
 use pcap::{Active, Capture, Device, Error, Packet};
 use tracing::{info, warn};
 
-use crate::flow::{Flow, UdpPeerFlow};
+use crate::flow::{BittorrentFlow, Flow, UdpPeerFlow, BITTORRENT_HANDSHAKE_HEADER};
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct TimeVal {
@@ -175,13 +176,17 @@ impl TcpFlowParser {
 pub struct UdpFlowParser {
     pub peer_flows: HashMap<(InetAddr, u16, InetAddr, u16), UdpPeerFlow>,
     pub create_time: HashMap<(InetAddr, u16, InetAddr, u16), SystemTime>,
+    ac: AhoCorasick,
 }
 
 impl UdpFlowParser {
     pub fn new() -> Self {
+        let patterns = [b"\x00\x00".to_vec(), b"\x13\x42\x69\x74".to_vec()];
+        let ac = AhoCorasick::new(&patterns);
         Self {
             peer_flows: HashMap::new(),
             create_time: HashMap::new(),
+            ac,
         }
     }
 
@@ -189,22 +194,22 @@ impl UdpFlowParser {
         // 这里依据flow的analysis执行时间以及结果决定是否删除对应的flow以及结果项释放内存
     }
 
-    pub fn parse_flow(&mut self, flow: Flow) {
+    pub fn parse_flow(&mut self, flow: Flow) -> Option<HashMap<u16, BittorrentFlow>> {
         let mut flow = flow;
 
         // 如果能在Parser存储的UdpPeerFlow中找到该四元组，那么就将新的数据包加进去
         if let Some(e) = self.peer_flows.get_mut(&flow.info.get_src_dst_tuple()) {
             info!("add packets to known udp flow {:?}", flow.info);
             e.add_packets(&flow);
-            e.analysis();
-            return;
+            e.filter_utp_to_buf();
+            return Some(e.get_result_from_buf(&self.ac));
         }
 
         if let Some(e) = self.peer_flows.get_mut(&flow.info.get_dst_src_tuple()) {
             info!("add packets to known udp flow {:?}", flow.info);
             e.add_packets(&flow);
-            e.analysis();
-            return;
+            e.filter_utp_to_buf();
+            return Some(e.get_result_from_buf(&self.ac));
         }
 
         flow.packets.sort_by(|x, y| {
@@ -212,21 +217,38 @@ impl UdpFlowParser {
         });
         for p in flow.packets.iter() {
             // 这里需要检测不同的特征，如果特征成立，则送去分析Bt协议
-            // TODO: 字符串匹配 0x13 BitTorrent protocol
-
-            // 特征：UDP报文直接承载bencode流
-            let re = bende::decode::<bende::Value>(p.payload.as_slice());
-            // if there is valid bencode udp packet
-            if let Ok(_) = re {
+            // 字符串匹配 0x13 BitTorrent protocol
+            let mut it =
+                memchr::memmem::find_iter(p.payload.as_slice(), &BITTORRENT_HANDSHAKE_HEADER);
+            if let None = it.next() {
+                //特征：UDP报文直接承载bencode流
+                let re = bende::decode::<bende::Value>(p.payload.as_slice());
+                if let Err(_) = re {
+                    continue;
+                } else {
+                    let mut peer_flow = UdpPeerFlow::from_flow(&flow);
+                    peer_flow.filter_utp_to_buf();
+                    let re = peer_flow.get_result_from_buf(&self.ac);
+                    info!("create interested udp flow {:?}", peer_flow.info);
+                    self.create_time
+                        .insert(peer_flow.info.get_src_dst_tuple(), SystemTime::now());
+                    self.peer_flows
+                        .insert(peer_flow.info.get_src_dst_tuple(), peer_flow);
+                    return Some(re);
+                }
+            } else {
                 let mut peer_flow = UdpPeerFlow::from_flow(&flow);
-                peer_flow.analysis();
+                peer_flow.filter_utp_to_buf();
+                let re = peer_flow.get_result_from_buf(&self.ac);
                 info!("create interested udp flow {:?}", peer_flow.info);
                 self.create_time
                     .insert(peer_flow.info.get_src_dst_tuple(), SystemTime::now());
                 self.peer_flows
                     .insert(peer_flow.info.get_src_dst_tuple(), peer_flow);
-                return;
+                return Some(re);
             }
         }
+
+        None
     }
 }

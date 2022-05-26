@@ -96,7 +96,10 @@ fn main() {
         let mut udp_flow_rx = udp_flow_rx;
         let mut parser = UdpFlowParser::new();
         while let Some(flow) = udp_flow_rx.recv().await {
-            parser.parse_flow(flow);
+            let re = parser.parse_flow(flow);
+            if let Some(e) = re {
+                println!("{:?}", e);
+            }
         }
     });
 

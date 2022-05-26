@@ -1,10 +1,16 @@
 use std::{cmp::Ordering, collections::HashMap, hash::Hash, io::Cursor};
 
-use bytes::{Buf, BufMut, BytesMut};
+use aho_corasick::AhoCorasick;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::Serialize;
 use tracing::{info, instrument};
 
 use crate::parser::{InetAddr, PacketQuadruple, SimpleParsedPacket, TimeVal};
+
+pub const BITTORRENT_HANDSHAKE_HEADER: [u8; 20] = [
+    0x13, 0x42, 0x69, 0x74, 0x54, 0x6f, 0x72, 0x72, 0x65, 0x6e, 0x74, 0x20, 0x70, 0x72, 0x6f, 0x74,
+    0x6f, 0x63, 0x6f, 0x6c,
+];
 
 #[derive(Debug)]
 pub struct FlowCollections {
@@ -181,8 +187,8 @@ impl UdpPeerPacket {
 #[derive(Debug, Clone)]
 pub enum BitTorrentMessage {
     HandShake {
-        info_hash: Vec<u8>,
-        peer_id: Vec<u8>,
+        info_hash: Bytes,
+        peer_id: Bytes,
     },
     Choke,         //no payload
     Unchoke,       //no payload
@@ -192,8 +198,8 @@ pub enum BitTorrentMessage {
         idx: u32,
     },
     Bitfield {
-        bitfield: Vec<u8>,
-    }, //not interested
+        bitfield: Bytes,
+    },
     Request {
         piece_index: u32,
         begin_piece_offset: u32,
@@ -202,7 +208,7 @@ pub enum BitTorrentMessage {
     Piece {
         piece_index: u32,
         begin_piece_offset: u32,
-        data: Vec<u8>,
+        data: Bytes,
     },
     Cancel {
         piece_index: u32,
@@ -224,22 +230,16 @@ pub enum BitTorrentMessage {
     AllowedFast,
     // 0x14
     Extended {
-        data: Vec<u8>,
+        data: Bytes,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct BittorrentFlow {
-    pub conn_id1: u16,
-    pub conn_id2: u16,
     pub messages1: Vec<BitTorrentMessage>,
     pub messages2: Vec<BitTorrentMessage>,
-    pub info_hash: Option<Vec<u8>>, // 如果没有，则证明没有找到握手信息
-}
-
-pub fn parse_utp_to_bittorrent(packets: Vec<&UdpPeerPacket>) {
-    let mut buf = BytesMut::with_capacity(64);
-    for &p in packets.iter() {}
+    pub info_hash: Option<Bytes>, // 如果没有，则证明没有找到握手信息
+    pub info1: PacketQuadruple,
 }
 
 #[derive(Debug, Clone)]
@@ -247,7 +247,132 @@ pub struct UdpPeerFlow {
     pub packets: Vec<UdpPeerPacket>,
     pub info: PacketQuadruple,
     // start_timeval end_timeval
-    pub utp_binary_flow: HashMap<u16, (BytesMut, BytesMut)>,
+    pub utp_binary_flow: HashMap<u16, (BytesMut, BytesMut, PacketQuadruple)>,
+}
+
+fn parse_bt_stream(b0: &mut BytesMut, ac: &AhoCorasick) -> Vec<BitTorrentMessage> {
+    let mut msg1 = Vec::new();
+    loop {
+        if b0.len() < 5 {
+            break;
+        }
+        if b0.starts_with(&BITTORRENT_HANDSHAKE_HEADER) {
+            if b0.len() < 68 {
+                break;
+            }
+            let mut packet = b0.split_to(68);
+            packet.advance(28);
+            let info_hash = packet.split_to(20).freeze();
+            let peer_id = packet.freeze();
+            msg1.push(BitTorrentMessage::HandShake { info_hash, peer_id });
+        } else {
+            let msg_len = b0.get(0..4).unwrap().get_u32();
+            let msg_type = b0[4];
+            // 这里检测信息长度，现在的bt实现piece都在16kb，所以最大长度为0x4009,根据规范，消息类型的编码至多为0x17
+            if msg_len < 0x5000 && msg_type < 0x20 {
+                if b0.len() >= msg_len as usize + 4 {
+                    // real message
+                    let mut packet = b0.split_to(msg_len as usize + 4);
+                    packet.advance(5);
+                    let mut payload = packet.freeze();
+                    match msg_type {
+                        0x00 => {
+                            //Choke
+                            msg1.push(BitTorrentMessage::Choke);
+                        }
+                        0x01 => {
+                            //UnChoke
+                            msg1.push(BitTorrentMessage::Unchoke);
+                        }
+                        0x02 => {
+                            //Interested
+                            msg1.push(BitTorrentMessage::Interested);
+                        }
+                        0x03 => {
+                            //NotInterested
+                            msg1.push(BitTorrentMessage::NotInterested);
+                        }
+                        0x04 => {
+                            //Have
+                            if payload.len() == 4 {
+                                let idx = payload.get_u32();
+                                msg1.push(BitTorrentMessage::Have { idx });
+                            }
+                        }
+                        0x05 => {
+                            //Bitfield
+                            if payload.len() > 0 {
+                                msg1.push(BitTorrentMessage::Bitfield { bitfield: payload })
+                            }
+                        }
+                        0x06 => {
+                            //Request
+                            if payload.len() == 12 {
+                                let piece_index = payload.get_u32();
+                                let begin_piece_offset = payload.get_u32();
+                                let piece_length = payload.get_u32();
+                                msg1.push(BitTorrentMessage::Request {
+                                    piece_index,
+                                    begin_piece_offset,
+                                    piece_length,
+                                });
+                            }
+                        }
+                        0x07 => {
+                            //Piece
+                            if payload.len() > 8 {
+                                let piece_index = payload.get_u32();
+                                let begin_piece_offset = payload.get_u32();
+                                msg1.push(BitTorrentMessage::Piece {
+                                    piece_index,
+                                    begin_piece_offset,
+                                    data: payload,
+                                });
+                            }
+                        }
+                        0x08 => {
+                            //Cancel
+                            if payload.len() == 12 {
+                                let piece_index = payload.get_u32();
+                                let begin_piece_offset = payload.get_u32();
+                                let piece_length = payload.get_u32();
+                                msg1.push(BitTorrentMessage::Cancel {
+                                    piece_index,
+                                    begin_piece_offset,
+                                    piece_length,
+                                });
+                            }
+                        }
+                        0x09 => {
+                            msg1.push(BitTorrentMessage::Port);
+                        }
+                        0x14 => msg1.push(BitTorrentMessage::Extended { data: payload }),
+                        _ => {}
+                    }
+                } else {
+                    break;
+                }
+            } else {
+                // 进入丢弃模式
+                // 利用AC算法，匹配可能的header
+                let mut flag = false;
+                for mat in ac.find_iter(&b0) {
+                    if mat.start() != 0 {
+                        flag = true;
+                        b0.advance(mat.start());
+                        break;
+                    }
+                }
+                if !flag {
+                    //not fond;
+                    //remain 3 characters for pattern handshake
+                    b0.advance(b0.len() - 3);
+                    break;
+                }
+            }
+        }
+    }
+    return msg1;
 }
 
 impl UdpPeerFlow {
@@ -263,6 +388,58 @@ impl UdpPeerFlow {
         }
     }
 
+    pub fn get_result_from_buf(&mut self, ac: &AhoCorasick) -> HashMap<u16, BittorrentFlow> {
+        let mut map = HashMap::new();
+        for (k, (b0, b1, info)) in self.utp_binary_flow.iter_mut() {
+            let msg0 = parse_bt_stream(b0, ac);
+            let msg1 = parse_bt_stream(b1, ac);
+            let mut ifhs = None;
+
+            let re0 = msg0.iter().find(|x| {
+                if let BitTorrentMessage::HandShake { .. } = x {
+                    true
+                } else {
+                    false
+                }
+            });
+            if let Some(x) = re0 {
+                if let BitTorrentMessage::HandShake {
+                    info_hash,
+                    peer_id: _,
+                } = x
+                {
+                    ifhs = Some(info_hash.clone());
+                }
+            } else {
+                let re1 = msg1.iter().find(|x| {
+                    if let BitTorrentMessage::HandShake { .. } = x {
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if let Some(x) = re1 {
+                    if let BitTorrentMessage::HandShake {
+                        info_hash,
+                        peer_id: _,
+                    } = x
+                    {
+                        ifhs = Some(info_hash.clone());
+                    }
+                }
+            }
+
+            let bt_flow = BittorrentFlow {
+                messages1: msg0,
+                messages2: msg1,
+                info1: info.clone(),
+                info_hash: ifhs,
+            };
+            map.insert(*k, bt_flow);
+        }
+        map
+    }
+
     pub fn add_packets(&mut self, flow: &Flow) {
         for p in flow.packets.iter() {
             self.packets.push(UdpPeerPacket::from_simple_packet(p));
@@ -270,8 +447,7 @@ impl UdpPeerFlow {
         self.packets.sort_by(|x, y| x.timeval.cmp(&y.timeval));
     }
 
-    // #[instrument]
-    pub fn analysis(&mut self) {
+    pub fn filter_utp_to_buf(&mut self) {
         let utp_packet: Vec<&UdpPeerPacket> = self
             .packets
             .iter()
@@ -350,6 +526,10 @@ impl UdpPeerFlow {
                 return false;
             });
 
+            if packets1.is_empty() && packets2.is_empty() {
+                return;
+            }
+
             if let Some(e) = self.utp_binary_flow.get_mut(&connid1) {
                 for p in packets1 {
                     if let UdpPeerPacketEnum::Utp(d) = &p.data {
@@ -364,6 +544,19 @@ impl UdpPeerFlow {
             } else {
                 let mut e0 = BytesMut::with_capacity(64);
                 let mut e1 = BytesMut::with_capacity(64);
+                // inf 记录的是较小的connid对应的四元组，而较大的connid则是相反的
+                let inf = if !packets1.is_empty() {
+                    packets1[0].info.clone()
+                } else {
+                    let temp = packets2[0].info.clone();
+                    PacketQuadruple {
+                        src_port: temp.dst_port,
+                        dst_port: temp.src_port,
+                        src_ip: temp.dst_ip,
+                        dst_ip: temp.src_ip,
+                        transport: temp.transport,
+                    }
+                };
                 for p in packets1 {
                     if let UdpPeerPacketEnum::Utp(d) = &p.data {
                         e0.extend_from_slice(d.payload.as_slice());
@@ -374,9 +567,32 @@ impl UdpPeerFlow {
                         e1.extend_from_slice(d.payload.as_slice());
                     }
                 }
-                self.utp_binary_flow.insert(connid1, (e0, e1));
+                self.utp_binary_flow.insert(connid1, (e0, e1, inf));
             }
         }
         self.packets.clear();
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
+    use bytes::{Buf, Bytes, BytesMut};
+
+    #[test]
+    fn test_ac_automata() {
+        let patterns = [b"\x00\x00".to_vec(), b"\x13\x42\x69\x74".to_vec()];
+        let ac = AhoCorasick::new(&patterns);
+        let mut string = BytesMut::from(
+            &b"\x01\x00\x00\x00\x99\x14\x00\x64\x31\x32\x3a\x63\x6f\x6d\x70\x6c\x65\x13\x42\x69\x74"[..],
+        );
+        println!("{:?}", string);
+        let mut matches = vec![];
+        for mat in ac.find_overlapping_iter(&string.to_vec()) {
+            matches.push((mat.pattern(), mat.start(), mat.end()));
+        }
+        println!("{:?}", matches);
+        string.advance(string.len() - 1);
+        println!("{:?}", string);
     }
 }
