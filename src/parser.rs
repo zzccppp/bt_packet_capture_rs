@@ -169,7 +169,11 @@ impl TcpFlowParser {
         Self {}
     }
 
-    pub fn parse_flow(&mut self, flow: Flow) {}
+    pub fn parse_flow(&mut self, flow: Flow) {
+        for p in flow.packets {
+            
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

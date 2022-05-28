@@ -11,7 +11,6 @@ use tokio::sync::mpsc;
 use tokio::{select, time};
 use tracing::info;
 
-pub mod bencode;
 pub mod flow;
 pub mod parser;
 
