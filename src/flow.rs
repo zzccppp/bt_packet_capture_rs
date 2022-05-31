@@ -1,8 +1,7 @@
-use std::{cmp::Ordering, collections::HashMap, hash::Hash, io::Cursor};
+use std::{cmp::Ordering, collections::HashMap, io::Cursor};
 
 use aho_corasick::AhoCorasick;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use serde::Serialize;
 use tracing::{info, instrument};
 
 use crate::parser::{InetAddr, PacketQuadruple, SimpleParsedPacket, TimeVal};
@@ -240,6 +239,144 @@ pub struct BittorrentFlow {
     pub messages2: Vec<BitTorrentMessage>,
     pub info_hash: Option<Bytes>, // 如果没有，则证明没有找到握手信息
     pub info1: PacketQuadruple,
+    pub start_timeval: TimeVal,
+    pub end_timeval: TimeVal,
+}
+
+#[derive(Debug, Clone)]
+pub struct TcpPeerFlow {
+    pub info1: PacketQuadruple,
+    pub info2: PacketQuadruple,
+    pub binary_buf1: BytesMut,
+    pub binary_buf2: BytesMut,
+    pub start_timeval: TimeVal,
+    pub end_timeval: TimeVal,
+}
+
+impl TcpPeerFlow {
+    pub fn new(flow: Flow) -> Self {
+        let start_timeval = flow.packets[0].timeval;
+        let end_timeval = flow.packets[flow.packets.len() - 1].timeval;
+        let mut packets1: Vec<&SimpleParsedPacket> = flow
+            .packets
+            .iter()
+            .filter(|x| {
+                x.info.get_src_dst_tuple() == flow.info.get_src_dst_tuple() && x.payload.len() != 0
+            })
+            .collect();
+        let mut packets2: Vec<&SimpleParsedPacket> = flow
+            .packets
+            .iter()
+            .filter(|x| {
+                x.info.get_src_dst_tuple() == flow.info.get_dst_src_tuple() && x.payload.len() != 0
+            })
+            .collect();
+
+        packets1.sort_by(|x, y| x.info.get_tcp_seq().cmp(&y.info.get_tcp_seq()));
+        packets1.dedup_by(|x, y| x.info.get_tcp_seq() == y.info.get_tcp_seq());
+        packets2.sort_by(|x, y| x.info.get_tcp_seq().cmp(&y.info.get_tcp_seq()));
+        packets2.dedup_by(|x, y| x.info.get_tcp_seq() == y.info.get_tcp_seq());
+
+        // reassemble into binary flow
+        let mut binary_buf1 = BytesMut::with_capacity(64);
+        let mut binary_buf2 = BytesMut::with_capacity(64);
+        for p in packets1 {
+            binary_buf1.extend_from_slice(p.payload.as_slice());
+        }
+        for p in packets2 {
+            binary_buf2.extend_from_slice(p.payload.as_slice());
+        }
+
+        Self {
+            info1: flow.info.clone(),
+            info2: flow.info.get_reverse_self(),
+            binary_buf1,
+            binary_buf2,
+            start_timeval,
+            end_timeval,
+        }
+    }
+
+    pub fn add_packets(&mut self,flow: Flow) {
+        self.end_timeval = flow.packets[flow.packets.len() - 1].timeval;
+        let mut packets1: Vec<&SimpleParsedPacket> = flow
+            .packets
+            .iter()
+            .filter(|x| {
+                x.info.get_src_dst_tuple() == self.info1.get_src_dst_tuple() && x.payload.len() != 0
+            })
+            .collect();
+        let mut packets2: Vec<&SimpleParsedPacket> = flow
+            .packets
+            .iter()
+            .filter(|x| {
+                x.info.get_src_dst_tuple() == self.info2.get_src_dst_tuple() && x.payload.len() != 0
+            })
+            .collect();
+
+        packets1.sort_by(|x, y| x.info.get_tcp_seq().cmp(&y.info.get_tcp_seq()));
+        packets1.dedup_by(|x, y| x.info.get_tcp_seq() == y.info.get_tcp_seq());
+        packets2.sort_by(|x, y| x.info.get_tcp_seq().cmp(&y.info.get_tcp_seq()));
+        packets2.dedup_by(|x, y| x.info.get_tcp_seq() == y.info.get_tcp_seq());
+
+        // reassemble into binary flow
+        for p in packets1 {
+            self.binary_buf1.extend_from_slice(p.payload.as_slice());
+        }
+        for p in packets2 {
+            self.binary_buf2.extend_from_slice(p.payload.as_slice());
+        }
+    }
+
+    pub fn get_result_from_buf(&mut self, ac: &AhoCorasick) -> BittorrentFlow {
+        let message1 = parse_bt_stream(&mut self.binary_buf1, ac);
+        let message2 = parse_bt_stream(&mut self.binary_buf2, ac);
+
+        let mut ifhs = None;
+
+        let re0 = message1.iter().find(|x| {
+            if let BitTorrentMessage::HandShake { .. } = x {
+                true
+            } else {
+                false
+            }
+        });
+        if let Some(x) = re0 {
+            if let BitTorrentMessage::HandShake {
+                info_hash,
+                peer_id: _,
+            } = x
+            {
+                ifhs = Some(info_hash.clone());
+            }
+        } else {
+            let re1 = message2.iter().find(|x| {
+                if let BitTorrentMessage::HandShake { .. } = x {
+                    true
+                } else {
+                    false
+                }
+            });
+            if let Some(x) = re1 {
+                if let BitTorrentMessage::HandShake {
+                    info_hash,
+                    peer_id: _,
+                } = x
+                {
+                    ifhs = Some(info_hash.clone());
+                }
+            }
+        }
+
+        BittorrentFlow {
+            messages1: message1,
+            messages2: message2,
+            info_hash: ifhs,
+            info1: self.info1.clone(),
+            start_timeval: self.start_timeval,
+            end_timeval: self.end_timeval,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +385,8 @@ pub struct UdpPeerFlow {
     pub info: PacketQuadruple,
     // start_timeval end_timeval
     pub utp_binary_flow: HashMap<u16, (BytesMut, BytesMut, PacketQuadruple)>,
+    pub start_timeval: TimeVal,
+    pub end_timeval: TimeVal,
 }
 
 fn parse_bt_stream(b0: &mut BytesMut, ac: &AhoCorasick) -> Vec<BitTorrentMessage> {
@@ -381,10 +520,29 @@ impl UdpPeerFlow {
         for p in flow.packets.iter() {
             peer_packets.push(UdpPeerPacket::from_simple_packet(p));
         }
+        peer_packets.sort_by(|x, y| x.timeval.cmp(&y.timeval));
+        let start_timeval = if peer_packets.len() == 0 {
+            TimeVal {
+                tv_sec: i64::MAX,
+                tv_usec: i64::MAX,
+            }
+        } else {
+            peer_packets[0].timeval.clone()
+        };
+        let end_timeval = if peer_packets.len() == 0 {
+            TimeVal {
+                tv_sec: 0,
+                tv_usec: 0,
+            }
+        } else {
+            peer_packets[peer_packets.len() - 1].timeval.clone()
+        };
         Self {
             packets: peer_packets,
             info: flow.info.clone(),
             utp_binary_flow: HashMap::new(),
+            start_timeval,
+            end_timeval,
         }
     }
 
@@ -434,6 +592,8 @@ impl UdpPeerFlow {
                 messages2: msg1,
                 info1: info.clone(),
                 info_hash: ifhs,
+                start_timeval: self.start_timeval.clone(),
+                end_timeval: self.end_timeval.clone(),
             };
             map.insert(*k, bt_flow);
         }
@@ -445,6 +605,14 @@ impl UdpPeerFlow {
             self.packets.push(UdpPeerPacket::from_simple_packet(p));
         }
         self.packets.sort_by(|x, y| x.timeval.cmp(&y.timeval));
+        if self.packets.len() != 0 {
+            if self.packets[self.packets.len() - 1].timeval > self.end_timeval {
+                self.end_timeval = self.packets[self.packets.len() - 1].timeval.clone();
+            }
+            if self.packets[0].timeval < self.start_timeval {
+                self.start_timeval = self.packets[0].timeval.clone();
+            }
+        }
     }
 
     pub fn filter_utp_to_buf(&mut self) {

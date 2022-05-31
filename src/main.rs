@@ -1,5 +1,7 @@
 use crate::flow::Flow;
-use crate::parser::{SimpleDumpCodec, SimpleParsedPacket, TcpFlowParser, UdpFlowParser};
+use crate::parser::{
+    SimpleDumpCodec, SimpleParsedPacket, TcpFlowParser, TransportProtocol, UdpFlowParser,
+};
 use flow::FlowCollections;
 use futures::StreamExt;
 use inquire::{Select, Text};
@@ -88,7 +90,10 @@ fn main() {
         let mut tcp_flow_rx = tcp_flow_rx;
         let mut parser = TcpFlowParser::new();
         while let Some(flow) = tcp_flow_rx.recv().await {
-            parser.parse_flow(flow);
+            let re = parser.parse_flow(flow);
+            if let Some(e) = re {
+                println!("{:?}", e);
+            }
         }
     });
     let h3 = rt.spawn(async move {
@@ -109,7 +114,7 @@ fn main() {
                 let mut codec = SimpleDumpCodec {};
                 if let Ok(s) = codec.decode(pcap) {
                     match s.info.transport {
-                        parser::TransportProtocol::Tcp => {
+                        parser::TransportProtocol::Tcp { seq } => {
                             tcp_tx.send(s).await.unwrap();
                         }
                         parser::TransportProtocol::Udp => {
@@ -127,7 +132,7 @@ fn main() {
             while let Some(packet) = stream.next().await {
                 if let Ok(s) = packet {
                     match s.info.transport {
-                        parser::TransportProtocol::Tcp => {
+                        parser::TransportProtocol::Tcp { seq : _} => {
                             tcp_tx.send(s).await.unwrap();
                         }
                         parser::TransportProtocol::Udp => {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::{SystemTime, SystemTimeError};
+use std::time::SystemTime;
 
 use aho_corasick::AhoCorasick;
 use etherparse::SlicedPacket;
@@ -8,9 +8,9 @@ use pcap::stream::{PacketCodec, PacketStream};
 use pcap::{Active, Capture, Device, Error, Packet};
 use tracing::{info, warn};
 
-use crate::flow::{BittorrentFlow, Flow, UdpPeerFlow, BITTORRENT_HANDSHAKE_HEADER};
+use crate::flow::{BittorrentFlow, Flow, TcpPeerFlow, UdpPeerFlow, BITTORRENT_HANDSHAKE_HEADER};
 
-#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord)]
 pub struct TimeVal {
     pub tv_sec: i64,
     pub tv_usec: i64,
@@ -31,7 +31,7 @@ pub enum InetAddr {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TransportProtocol {
-    Tcp,
+    Tcp { seq: u32 },
     Udp,
 }
 
@@ -45,6 +45,22 @@ pub struct PacketQuadruple {
 }
 
 impl PacketQuadruple {
+    pub fn get_reverse_self(&self) -> Self {
+        PacketQuadruple {
+            src_port: self.dst_port,
+            dst_port: self.src_port,
+            src_ip: self.dst_ip.clone(),
+            dst_ip: self.src_ip.clone(),
+            transport: self.transport.clone(),
+        }
+    }
+
+    pub fn get_tcp_seq(&self) -> u32 {
+        match self.transport {
+            TransportProtocol::Tcp { seq } => seq,
+            _ => panic!("not tcp"),
+        }
+    }
     pub fn get_src_dst_tuple(&self) -> (InetAddr, u16, InetAddr, u16) {
         (
             self.src_ip.clone(),
@@ -69,7 +85,7 @@ impl PacketQuadruple {
             dst_port: 0,
             src_ip: InetAddr::Ipv4(Ipv4Addr::UNSPECIFIED),
             dst_ip: InetAddr::Ipv4(Ipv4Addr::UNSPECIFIED),
-            transport: TransportProtocol::Tcp,
+            transport: TransportProtocol::Udp,
         };
         match &p.ip {
             Some(e) => match e {
@@ -97,7 +113,9 @@ impl PacketQuadruple {
                 etherparse::TransportSlice::Tcp(tcp) => {
                     inf.src_port = tcp.source_port();
                     inf.dst_port = tcp.destination_port();
-                    inf.transport = TransportProtocol::Tcp;
+                    inf.transport = TransportProtocol::Tcp {
+                        seq: tcp.sequence_number(),
+                    };
                 }
                 etherparse::TransportSlice::Unknown(_) => {
                     // println!("{:?}", p);
@@ -162,17 +180,61 @@ pub async fn start_new_stream(device: Device) -> PacketStream<Active, SimpleDump
 }
 
 #[derive(Debug, Clone)]
-pub struct TcpFlowParser {}
+pub struct TcpFlowParser {
+    pub peer_flows: HashMap<(InetAddr, u16, InetAddr, u16), TcpPeerFlow>,
+    pub create_time: HashMap<(InetAddr, u16, InetAddr, u16), SystemTime>,
+    ac: AhoCorasick,
+}
 
 impl TcpFlowParser {
     pub fn new() -> Self {
-        Self {}
+        let patterns = [b"\x00\x00".to_vec(), b"\x13\x42\x69\x74".to_vec()];
+        let ac = AhoCorasick::new(&patterns);
+        Self {
+            peer_flows: HashMap::new(),
+            create_time: HashMap::new(),
+            ac,
+        }
     }
 
-    pub fn parse_flow(&mut self, flow: Flow) {
-        for p in flow.packets {
-            
+    pub fn parse_flow(&mut self, mut flow: Flow) -> Option<BittorrentFlow> {
+        flow.packets.sort_by(|x, y| {
+            return x.timeval.cmp(&y.timeval);
+        });
+
+        if let Some(e) = self.peer_flows.get_mut(&flow.info.get_src_dst_tuple()) {
+            info!("add packets to known tcp flow {:?}", flow.info);
+            e.add_packets(flow);
+            return Some(e.get_result_from_buf(&self.ac));
         }
+
+        if let Some(e) = self.peer_flows.get_mut(&flow.info.get_dst_src_tuple()) {
+            info!("add packets to known tcp flow {:?}", flow.info);
+            e.add_packets(flow);
+            return Some(e.get_result_from_buf(&self.ac));
+        }
+
+        // new flow
+        for p in flow.packets.iter() {
+            if p.payload.len() == 0 {
+                continue;
+            }
+            let mut it =
+                memchr::memmem::find_iter(p.payload.as_slice(), &BITTORRENT_HANDSHAKE_HEADER);
+            if let Some(_) = it.next() {
+                println!("{:?}", p.payload);
+                let mut peer_flow = TcpPeerFlow::new(flow);
+                let re = peer_flow.get_result_from_buf(&self.ac);
+                info!("create interested tcp flow {:?}", peer_flow.info1);
+                self.create_time
+                    .insert(peer_flow.info1.get_src_dst_tuple(), SystemTime::now());
+                self.peer_flows
+                    .insert(peer_flow.info1.get_src_dst_tuple(), peer_flow);
+                return Some(re);
+            }
+        }
+
+        None
     }
 }
 
@@ -201,6 +263,10 @@ impl UdpFlowParser {
     pub fn parse_flow(&mut self, flow: Flow) -> Option<HashMap<u16, BittorrentFlow>> {
         let mut flow = flow;
 
+        flow.packets.sort_by(|x, y| {
+            return x.timeval.cmp(&y.timeval);
+        });
+
         // 如果能在Parser存储的UdpPeerFlow中找到该四元组，那么就将新的数据包加进去
         if let Some(e) = self.peer_flows.get_mut(&flow.info.get_src_dst_tuple()) {
             info!("add packets to known udp flow {:?}", flow.info);
@@ -216,9 +282,6 @@ impl UdpFlowParser {
             return Some(e.get_result_from_buf(&self.ac));
         }
 
-        flow.packets.sort_by(|x, y| {
-            return x.timeval.cmp(&y.timeval);
-        });
         for p in flow.packets.iter() {
             // 这里需要检测不同的特征，如果特征成立，则送去分析Bt协议
             // 字符串匹配 0x13 BitTorrent protocol
