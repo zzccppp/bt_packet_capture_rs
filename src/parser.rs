@@ -260,7 +260,7 @@ impl UdpFlowParser {
         // 这里依据flow的analysis执行时间以及结果决定是否删除对应的flow以及结果项释放内存
     }
 
-    pub fn parse_flow(&mut self, flow: Flow) -> Option<HashMap<u16, BittorrentFlow>> {
+    pub fn parse_flow(&mut self, flow: Flow) -> Option<BittorrentFlow> {
         let mut flow = flow;
 
         flow.packets.sort_by(|x, y| {
@@ -272,6 +272,7 @@ impl UdpFlowParser {
             info!("add packets to known udp flow {:?}", flow.info);
             e.add_packets(&flow);
             e.filter_utp_to_buf();
+            // info!("-----{:?}", e);
             return Some(e.get_result_from_buf(&self.ac));
         }
 
@@ -295,6 +296,7 @@ impl UdpFlowParser {
                 } else {
                     let mut peer_flow = UdpPeerFlow::from_flow(&flow);
                     peer_flow.filter_utp_to_buf();
+                    // info!("buf::{:?}", peer_flow);
                     let re = peer_flow.get_result_from_buf(&self.ac);
                     info!("create interested udp flow {:?}", peer_flow.info);
                     self.create_time

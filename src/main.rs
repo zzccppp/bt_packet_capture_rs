@@ -12,7 +12,7 @@ use tokio::time::sleep;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::{select, time};
-use tracing::info;
+use tracing::{info, error};
 
 pub mod flow;
 pub mod parser;
@@ -93,7 +93,11 @@ fn main() {
         while let Some(flow) = tcp_flow_rx.recv().await {
             let re = parser.parse_flow(flow);
             if let Some(e) = re {
-                println!("{:?}", e);
+                // info!("Tcp Parse Result: {:?}", e);
+                if e.get_all_piece_length() != 0 {
+                    error!("Tcp Parse Result Piece Length: {}", e.get_all_piece_length());
+                }
+                
             }
         }
     });
@@ -103,7 +107,10 @@ fn main() {
         while let Some(flow) = udp_flow_rx.recv().await {
             let re = parser.parse_flow(flow);
             if let Some(e) = re {
-                println!("{:?}", e);
+                // info!("Udp Parse Result: {:?}", e);
+                if e.get_all_piece_length() != 0 {
+                    error!("Udp Parse Result Piece Length: {}", e.get_all_piece_length());
+                }
             }
         }
     });
@@ -112,7 +119,7 @@ fn main() {
         rt.block_on(async move {
             let mut cap = Capture::from_file(filepath).unwrap();
             while let Ok(pcap) = cap.next() {
-                sleep(Duration::from_millis(100)).await;
+                sleep(Duration::from_millis(5)).await;
                 let mut codec = SimpleDumpCodec {};
                 if let Ok(s) = codec.decode(pcap) {
                     match s.info.transport {
@@ -132,6 +139,7 @@ fn main() {
 
         rt.block_on(async {
             while let Some(packet) = stream.next().await {
+                // println!("------------ {:?}", packet);
                 if let Ok(s) = packet {
                     match s.info.transport {
                         parser::TransportProtocol::Tcp { seq : _} => {

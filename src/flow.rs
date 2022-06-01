@@ -243,6 +243,33 @@ pub struct BittorrentFlow {
     pub end_timeval: TimeVal,
 }
 
+impl BittorrentFlow {
+    pub fn get_all_piece_length(&self) -> usize {
+        let mut sum = 0;
+        for m in self.messages1.iter() {
+            if let BitTorrentMessage::Piece {
+                piece_index: _idx,
+                begin_piece_offset: _off,
+                data: d,
+            } = m
+            {
+                sum += d.len();
+            }
+        }
+        for m in self.messages2.iter() {
+            if let BitTorrentMessage::Piece {
+                piece_index: _idx,
+                begin_piece_offset: _off,
+                data: d,
+            } = m
+            {
+                sum += d.len();
+            }
+        }
+        sum
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TcpPeerFlow {
     pub info1: PacketQuadruple,
@@ -297,7 +324,7 @@ impl TcpPeerFlow {
         }
     }
 
-    pub fn add_packets(&mut self,flow: Flow) {
+    pub fn add_packets(&mut self, flow: Flow) {
         self.end_timeval = flow.packets[flow.packets.len() - 1].timeval;
         let mut packets1: Vec<&SimpleParsedPacket> = flow
             .packets
@@ -383,8 +410,7 @@ impl TcpPeerFlow {
 pub struct UdpPeerFlow {
     pub packets: Vec<UdpPeerPacket>,
     pub info: PacketQuadruple,
-    // start_timeval end_timeval
-    pub utp_binary_flow: HashMap<u16, (BytesMut, BytesMut, PacketQuadruple)>,
+    pub utp_binary_flow: (BytesMut, BytesMut),
     pub start_timeval: TimeVal,
     pub end_timeval: TimeVal,
 }
@@ -408,7 +434,7 @@ fn parse_bt_stream(b0: &mut BytesMut, ac: &AhoCorasick) -> Vec<BitTorrentMessage
             let msg_len = b0.get(0..4).unwrap().get_u32();
             let msg_type = b0[4];
             // 这里检测信息长度，现在的bt实现piece都在16kb，所以最大长度为0x4009,根据规范，消息类型的编码至多为0x17
-            if msg_len < 0x5000 && msg_type < 0x20 {
+            if msg_len < 0x5000 && msg_len != 0 && msg_type < 0x20 {
                 if b0.len() >= msg_len as usize + 4 {
                     // real message
                     let mut packet = b0.split_to(msg_len as usize + 4);
@@ -540,27 +566,42 @@ impl UdpPeerFlow {
         Self {
             packets: peer_packets,
             info: flow.info.clone(),
-            utp_binary_flow: HashMap::new(),
+            utp_binary_flow: (BytesMut::with_capacity(64), BytesMut::with_capacity(64)),
             start_timeval,
             end_timeval,
         }
     }
 
-    pub fn get_result_from_buf(&mut self, ac: &AhoCorasick) -> HashMap<u16, BittorrentFlow> {
-        let mut map = HashMap::new();
-        for (k, (b0, b1, info)) in self.utp_binary_flow.iter_mut() {
-            let msg0 = parse_bt_stream(b0, ac);
-            let msg1 = parse_bt_stream(b1, ac);
-            let mut ifhs = None;
+    pub fn get_result_from_buf(&mut self, ac: &AhoCorasick) -> BittorrentFlow {
+        let (b0, b1) = &mut self.utp_binary_flow;
+        let msg0 = parse_bt_stream(b0, ac);
+        let msg1 = parse_bt_stream(b1, ac);
+        let mut ifhs = None;
 
-            let re0 = msg0.iter().find(|x| {
+        let re0 = msg0.iter().find(|x| {
+            if let BitTorrentMessage::HandShake { .. } = x {
+                true
+            } else {
+                false
+            }
+        });
+        if let Some(x) = re0 {
+            if let BitTorrentMessage::HandShake {
+                info_hash,
+                peer_id: _,
+            } = x
+            {
+                ifhs = Some(info_hash.clone());
+            }
+        } else {
+            let re1 = msg1.iter().find(|x| {
                 if let BitTorrentMessage::HandShake { .. } = x {
                     true
                 } else {
                     false
                 }
             });
-            if let Some(x) = re0 {
+            if let Some(x) = re1 {
                 if let BitTorrentMessage::HandShake {
                     info_hash,
                     peer_id: _,
@@ -568,41 +609,26 @@ impl UdpPeerFlow {
                 {
                     ifhs = Some(info_hash.clone());
                 }
-            } else {
-                let re1 = msg1.iter().find(|x| {
-                    if let BitTorrentMessage::HandShake { .. } = x {
-                        true
-                    } else {
-                        false
-                    }
-                });
-                if let Some(x) = re1 {
-                    if let BitTorrentMessage::HandShake {
-                        info_hash,
-                        peer_id: _,
-                    } = x
-                    {
-                        ifhs = Some(info_hash.clone());
-                    }
-                }
             }
-
-            let bt_flow = BittorrentFlow {
-                messages1: msg0,
-                messages2: msg1,
-                info1: info.clone(),
-                info_hash: ifhs,
-                start_timeval: self.start_timeval.clone(),
-                end_timeval: self.end_timeval.clone(),
-            };
-            map.insert(*k, bt_flow);
         }
-        map
+
+        let bt_flow = BittorrentFlow {
+            messages1: msg0,
+            messages2: msg1,
+            info1: self.info.clone(),
+            info_hash: ifhs,
+            start_timeval: self.start_timeval.clone(),
+            end_timeval: self.end_timeval.clone(),
+        };
+
+        bt_flow
     }
 
     pub fn add_packets(&mut self, flow: &Flow) {
         for p in flow.packets.iter() {
-            self.packets.push(UdpPeerPacket::from_simple_packet(p));
+            let re = UdpPeerPacket::from_simple_packet(p);
+            // println!("{:?}", re);
+            self.packets.push(re);
         }
         self.packets.sort_by(|x, y| x.timeval.cmp(&y.timeval));
         if self.packets.len() != 0 {
@@ -628,114 +654,70 @@ impl UdpPeerFlow {
             // 筛选出有价值的utp对话
             return;
         }
-        let mut conn_ids: Vec<u16> = utp_packet
-            .iter()
-            .map(|x| {
-                if let UdpPeerPacketEnum::Utp(e) = &x.data {
-                    return e.connid;
+
+        let mut packets1: Vec<&UdpPeerPacket> = vec![];
+        let mut packets2: Vec<&UdpPeerPacket> = vec![];
+        for &x in utp_packet.iter() {
+            if let UdpPeerPacketEnum::Utp(e) = &x.data {
+                if x.info.get_src_dst_tuple() == self.info.get_src_dst_tuple() && e.type_ver == 0x01
+                {
+                    packets1.push(x);
+                } else if x.info.get_src_dst_tuple() == self.info.get_dst_src_tuple()
+                    && e.type_ver == 0x01
+                {
+                    packets2.push(x);
                 }
-                return 0;
-            })
-            .collect();
-        conn_ids.sort();
-        conn_ids.dedup();
-        if conn_ids.is_empty() || conn_ids.len() < 2 {
+            }
+        }
+        packets1.sort_by(|x, y| {
+            if let UdpPeerPacketEnum::Utp(e1) = &x.data {
+                if let UdpPeerPacketEnum::Utp(e2) = &y.data {
+                    return e1.seq.cmp(&e2.seq);
+                }
+            }
+            return Ordering::Equal;
+        });
+        packets1.dedup_by(|x, y| {
+            if let UdpPeerPacketEnum::Utp(e1) = &x.data {
+                if let UdpPeerPacketEnum::Utp(e2) = &y.data {
+                    return e1.seq.eq(&e2.seq);
+                }
+            }
+            return false;
+        });
+        packets2.sort_by(|x, y| {
+            if let UdpPeerPacketEnum::Utp(e1) = &x.data {
+                if let UdpPeerPacketEnum::Utp(e2) = &y.data {
+                    return e1.seq.cmp(&e2.seq);
+                }
+            }
+            return Ordering::Equal;
+        });
+        packets2.dedup_by(|x, y| {
+            if let UdpPeerPacketEnum::Utp(e1) = &x.data {
+                if let UdpPeerPacketEnum::Utp(e2) = &y.data {
+                    return e1.seq.eq(&e2.seq);
+                }
+            }
+            return false;
+        });
+
+        if packets1.is_empty() && packets2.is_empty() {
             return;
         }
-        //get paired connid
-        let mut paired_connid: Vec<(u16, u16)> = vec![];
-        for i in (0..(conn_ids.len() / 2 * 2)).step_by(2) {
-            if conn_ids[i] == conn_ids[i + 1] - 1 {
-                paired_connid.push((conn_ids[i], conn_ids[i + 1]))
+
+        for p in packets1 {
+            if let UdpPeerPacketEnum::Utp(d) = &p.data {
+                self.utp_binary_flow
+                    .0
+                    .extend_from_slice(d.payload.as_slice());
             }
         }
-        for (connid1, connid2) in paired_connid {
-            let mut packets1: Vec<&UdpPeerPacket> = vec![];
-            let mut packets2: Vec<&UdpPeerPacket> = vec![];
-            for &x in utp_packet.iter() {
-                if let UdpPeerPacketEnum::Utp(e) = &x.data {
-                    if e.connid == connid1 && e.type_ver == 0x01 {
-                        packets1.push(x);
-                    } else if e.connid == connid2 && e.type_ver == 0x01 {
-                        packets2.push(x);
-                    }
-                }
-            }
-            packets1.sort_by(|x, y| {
-                if let UdpPeerPacketEnum::Utp(e1) = &x.data {
-                    if let UdpPeerPacketEnum::Utp(e2) = &y.data {
-                        return e1.seq.cmp(&e2.seq);
-                    }
-                }
-                return Ordering::Equal;
-            });
-            packets1.dedup_by(|x, y| {
-                if let UdpPeerPacketEnum::Utp(e1) = &x.data {
-                    if let UdpPeerPacketEnum::Utp(e2) = &y.data {
-                        return e1.seq.eq(&e2.seq);
-                    }
-                }
-                return false;
-            });
-            packets2.sort_by(|x, y| {
-                if let UdpPeerPacketEnum::Utp(e1) = &x.data {
-                    if let UdpPeerPacketEnum::Utp(e2) = &y.data {
-                        return e1.seq.cmp(&e2.seq);
-                    }
-                }
-                return Ordering::Equal;
-            });
-            packets2.dedup_by(|x, y| {
-                if let UdpPeerPacketEnum::Utp(e1) = &x.data {
-                    if let UdpPeerPacketEnum::Utp(e2) = &y.data {
-                        return e1.seq.eq(&e2.seq);
-                    }
-                }
-                return false;
-            });
-
-            if packets1.is_empty() && packets2.is_empty() {
-                return;
-            }
-
-            if let Some(e) = self.utp_binary_flow.get_mut(&connid1) {
-                for p in packets1 {
-                    if let UdpPeerPacketEnum::Utp(d) = &p.data {
-                        e.0.extend_from_slice(d.payload.as_slice());
-                    }
-                }
-                for p in packets2 {
-                    if let UdpPeerPacketEnum::Utp(d) = &p.data {
-                        e.1.extend_from_slice(d.payload.as_slice());
-                    }
-                }
-            } else {
-                let mut e0 = BytesMut::with_capacity(64);
-                let mut e1 = BytesMut::with_capacity(64);
-                // inf 记录的是较小的connid对应的四元组，而较大的connid则是相反的
-                let inf = if !packets1.is_empty() {
-                    packets1[0].info.clone()
-                } else {
-                    let temp = packets2[0].info.clone();
-                    PacketQuadruple {
-                        src_port: temp.dst_port,
-                        dst_port: temp.src_port,
-                        src_ip: temp.dst_ip,
-                        dst_ip: temp.src_ip,
-                        transport: temp.transport,
-                    }
-                };
-                for p in packets1 {
-                    if let UdpPeerPacketEnum::Utp(d) = &p.data {
-                        e0.extend_from_slice(d.payload.as_slice());
-                    }
-                }
-                for p in packets2 {
-                    if let UdpPeerPacketEnum::Utp(d) = &p.data {
-                        e1.extend_from_slice(d.payload.as_slice());
-                    }
-                }
-                self.utp_binary_flow.insert(connid1, (e0, e1, inf));
+        for p in packets2 {
+            if let UdpPeerPacketEnum::Utp(d) = &p.data {
+                self.utp_binary_flow
+                    .1
+                    .extend_from_slice(d.payload.as_slice());
             }
         }
         self.packets.clear();
