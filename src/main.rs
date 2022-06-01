@@ -29,11 +29,13 @@ fn main() {
         device_list.iter().map(|dev| dev.name.clone()).collect();
     device_list_name.push("Read Pcap File".to_string());
 
-    let sel = Select::new("Select a device", device_list_name.clone())
-        .prompt()
-        .unwrap();
+    // let sel = Select::new("Select a device", device_list_name.clone())
+    //     .prompt()
+    //     .unwrap();
 
-    let index = device_list_name.iter().position(|s| *s == sel).unwrap();
+    // let index = device_list_name.iter().position(|s| *s == sel).unwrap();
+    let index = 0;
+
     let mut filepath = "".to_string();
     let is_read_file = index == device_list_name.len() - 1;
 

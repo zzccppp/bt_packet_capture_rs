@@ -170,7 +170,7 @@ pub async fn start_new_stream(device: Device) -> PacketStream<Active, SimpleDump
     let cap = Capture::from_device(device)
         .unwrap()
         .buffer_size(1024 * 1024 * 64)
-        .immediate_mode(true)
+        // .immediate_mode(true)
         .open()
         .unwrap()
         .setnonblock()
@@ -262,6 +262,7 @@ impl UdpFlowParser {
 
     pub fn parse_flow(&mut self, flow: Flow) -> Option<BittorrentFlow> {
         let mut flow = flow;
+        warn!("flow size: {}", flow.packets.len());
 
         flow.packets.sort_by(|x, y| {
             return x.timeval.cmp(&y.timeval);
