@@ -8,6 +8,7 @@ use inquire::{Select, Text};
 use parser::start_new_stream;
 use pcap::stream::PacketCodec;
 use pcap::{Capture, Device};
+use tokio::time::sleep;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::{select, time};
@@ -111,6 +112,7 @@ fn main() {
         rt.block_on(async move {
             let mut cap = Capture::from_file(filepath).unwrap();
             while let Ok(pcap) = cap.next() {
+                sleep(Duration::from_millis(100)).await;
                 let mut codec = SimpleDumpCodec {};
                 if let Ok(s) = codec.decode(pcap) {
                     match s.info.transport {
