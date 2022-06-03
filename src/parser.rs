@@ -262,7 +262,7 @@ impl UdpFlowParser {
 
     pub fn parse_flow(&mut self, flow: Flow) -> Option<BittorrentFlow> {
         let mut flow = flow;
-        warn!("flow size: {}", flow.packets.len());
+        // warn!("flow size: {}", flow.packets.len());
 
         flow.packets.sort_by(|x, y| {
             return x.timeval.cmp(&y.timeval);
@@ -320,5 +320,17 @@ impl UdpFlowParser {
         }
 
         None
+    }
+}
+
+pub struct BittorrentFlowInfCache {
+    pub map: HashMap<(InetAddr, u16, InetAddr, u16), BittorrentFlow>,
+}
+
+impl BittorrentFlowInfCache {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
     }
 }

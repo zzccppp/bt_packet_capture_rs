@@ -29,12 +29,12 @@ fn main() {
         device_list.iter().map(|dev| dev.name.clone()).collect();
     device_list_name.push("Read Pcap File".to_string());
 
-    // let sel = Select::new("Select a device", device_list_name.clone())
-    //     .prompt()
-    //     .unwrap();
+    let sel = Select::new("Select a device", device_list_name.clone())
+        .prompt()
+        .unwrap();
 
-    // let index = device_list_name.iter().position(|s| *s == sel).unwrap();
-    let index = 0;
+    let index = device_list_name.iter().position(|s| *s == sel).unwrap();
+    // let index = 0;
 
     let mut filepath = "".to_string();
     let is_read_file = index == device_list_name.len() - 1;
@@ -121,7 +121,7 @@ fn main() {
         rt.block_on(async move {
             let mut cap = Capture::from_file(filepath).unwrap();
             while let Ok(pcap) = cap.next() {
-                sleep(Duration::from_millis(5)).await;
+                // sleep(Duration::from_millis(5)).await;
                 let mut codec = SimpleDumpCodec {};
                 if let Ok(s) = codec.decode(pcap) {
                     match s.info.transport {
