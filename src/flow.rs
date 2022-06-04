@@ -244,6 +244,56 @@ pub struct BittorrentFlow {
 }
 
 impl BittorrentFlow {
+    pub fn get_a_piece_message(&self) -> &BitTorrentMessage {
+        let fd = self.messages1.iter().find(|m| {
+            if let BitTorrentMessage::Piece { .. } = m {
+                true
+            } else {
+                false
+            }
+        });
+        if let Some(fd) = fd {
+            return fd;
+        }
+        let fd = self.messages2.iter().find(|m| {
+            if let BitTorrentMessage::Piece { .. } = m {
+                true
+            } else {
+                false
+            }
+        });
+        return fd.unwrap();
+    }
+    pub fn get_message_counts(&self) -> (usize, usize) {
+        return (self.messages1.len(), self.messages2.len());
+    }
+
+    pub fn get_piece_bytes(&self) -> (usize, usize) {
+        let mut sum1 = 0;
+        let mut sum2 = 0;
+        for m in self.messages1.iter() {
+            if let BitTorrentMessage::Piece {
+                piece_index: _idx,
+                begin_piece_offset: _off,
+                data: d,
+            } = m
+            {
+                sum1 += d.len();
+            }
+        }
+        for m in self.messages2.iter() {
+            if let BitTorrentMessage::Piece {
+                piece_index: _idx,
+                begin_piece_offset: _off,
+                data: d,
+            } = m
+            {
+                sum2 += d.len();
+            }
+        }
+        (sum1, sum2)
+    }
+
     pub fn get_all_piece_length(&self) -> usize {
         let mut sum = 0;
         for m in self.messages1.iter() {

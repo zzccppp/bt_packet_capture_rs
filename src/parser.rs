@@ -17,6 +17,12 @@ pub struct TimeVal {
     pub tv_usec: i64,
 }
 
+impl TimeVal {
+    pub fn to_timestamp(&self) -> u64 {
+        self.tv_sec as u64 * 1000 + self.tv_usec as u64 / 1000
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SimpleParsedPacket {
     pub payload: Vec<u8>,
@@ -28,6 +34,15 @@ pub struct SimpleParsedPacket {
 pub enum InetAddr {
     Ipv4(Ipv4Addr),
     Ipv6(Ipv6Addr),
+}
+
+impl InetAddr {
+    pub fn to_string(&self) -> String {
+        match self {
+            InetAddr::Ipv4(ip) => ip.to_string(),
+            InetAddr::Ipv6(ip) => ip.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -452,12 +467,14 @@ impl BittorrentFlowInf {
 #[derive(Debug, Clone)]
 pub struct BittorrentFlowInfCache {
     pub map: HashMap<(InetAddr, u16, InetAddr, u16), BittorrentFlowInf>,
+    pub file_piece_send_count: HashMap<String, u32>,
 }
 
 impl BittorrentFlowInfCache {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+            file_piece_send_count: HashMap::new(),
         }
     }
 
@@ -474,6 +491,42 @@ impl BittorrentFlowInfCache {
                 self.map.insert(flow.info1.get_src_dst_tuple(), inf);
             }
             return re;
+        }
+    }
+
+    pub fn is_info_reverse(&self, flow: &BittorrentFlow) -> Option<bool> {
+        if let Some(_) = self.map.get(&flow.info1.get_src_dst_tuple()) {
+            Some(false)
+        } else if let Some(_) = self.map.get(&flow.info1.get_dst_src_tuple()) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_info(&self, flow: &BittorrentFlow) -> Option<&BittorrentFlowInf> {
+        if let Some(e) = self.map.get(&flow.info1.get_src_dst_tuple()) {
+            Some(e)
+        } else if let Some(e) = self.map.get(&flow.info1.get_dst_src_tuple()) {
+            Some(e)
+        } else {
+            None
+        }
+    }
+
+    pub fn file_piece_sent_inc(&mut self, file_name: &str) {
+        if let Some(e) = self.file_piece_send_count.get_mut(file_name) {
+            *e += 1;
+        } else {
+            self.file_piece_send_count.insert(file_name.to_string(), 1);
+        }
+    }
+
+    pub fn get_file_piece_sent(&self, file_name: &str) -> u32 {
+        if let Some(e) = self.file_piece_send_count.get(file_name) {
+            *e
+        } else {
+            0
         }
     }
 }

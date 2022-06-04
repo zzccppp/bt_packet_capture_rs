@@ -17,6 +17,7 @@ use tracing::{error, info};
 
 pub mod flow;
 pub mod parser;
+pub mod uploader;
 
 fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -93,10 +94,15 @@ fn main() {
     let h2 = rt.spawn(async move {
         let mut tcp_flow_rx = tcp_flow_rx;
         let mut parser = TcpFlowParser::new();
+        let mut cache = BittorrentFlowInfCache::new();
         while let Some(flow) = tcp_flow_rx.recv().await {
-            let re = parser.parse_flow(flow);
-            if let Some(e) = re {
-                // info!("Tcp Parse Result: {:?}", e);
+            if let Some(e) = parser.parse_flow(flow) {
+                let re = cache.update(&e);
+                if re {
+                    // new basic inf here
+                    uploader::send_basic_inf(&cache, &e, "BT/TCP");
+                }
+                uploader::send_message_count_and_transfer_bytes(&cache, &e);
                 if e.get_all_piece_length() != 0 {
                     error!(
                         "Tcp Parse Result Piece Length: {}, info_hash: {:?}, quad: {:?}",
@@ -113,13 +119,17 @@ fn main() {
         let mut parser = UdpFlowParser::new();
         let mut cache = BittorrentFlowInfCache::new();
         while let Some(flow) = udp_flow_rx.recv().await {
-            let re = parser.parse_flow(flow);
-            if let Some(e) = re {
+            if let Some(e) = parser.parse_flow(flow) {
                 let re = cache.update(&e);
-                if !re {
-                    println!("{:?}", cache);
+                if re {
+                    // new basic inf here
+                    uploader::send_basic_inf(&cache, &e, "uTP");
                 }
+                // update message count and transfer bytes
+                uploader::send_message_count_and_transfer_bytes(&cache, &e);
+                // upload a file pieces
                 if e.get_all_piece_length() != 0 {
+                    uploader::send_file_piece(&mut cache, &e);
                     error!(
                         "Udp Parse Result Piece Length: {}, info_hash: {:?}, quad: {:?}",
                         e.get_all_piece_length(),
