@@ -1,6 +1,7 @@
 use crate::flow::Flow;
 use crate::parser::{
-    SimpleDumpCodec, SimpleParsedPacket, TcpFlowParser, TransportProtocol, UdpFlowParser,
+    BittorrentFlowInfCache, SimpleDumpCodec, SimpleParsedPacket, TcpFlowParser, TransportProtocol,
+    UdpFlowParser,
 };
 use flow::FlowCollections;
 use futures::StreamExt;
@@ -8,11 +9,11 @@ use inquire::{Select, Text};
 use parser::start_new_stream;
 use pcap::stream::PacketCodec;
 use pcap::{Capture, Device};
-use tokio::time::sleep;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::sleep;
 use tokio::{select, time};
-use tracing::{info, error};
+use tracing::{error, info};
 
 pub mod flow;
 pub mod parser;
@@ -97,21 +98,34 @@ fn main() {
             if let Some(e) = re {
                 // info!("Tcp Parse Result: {:?}", e);
                 if e.get_all_piece_length() != 0 {
-                    error!("Tcp Parse Result Piece Length: {}", e.get_all_piece_length());
+                    error!(
+                        "Tcp Parse Result Piece Length: {}, info_hash: {:?}, quad: {:?}",
+                        e.get_all_piece_length(),
+                        e.info_hash,
+                        e.info1
+                    );
                 }
-                
             }
         }
     });
     let h3 = rt.spawn(async move {
         let mut udp_flow_rx = udp_flow_rx;
         let mut parser = UdpFlowParser::new();
+        let mut cache = BittorrentFlowInfCache::new();
         while let Some(flow) = udp_flow_rx.recv().await {
             let re = parser.parse_flow(flow);
             if let Some(e) = re {
-                // info!("Udp Parse Result: {:?}", e);
+                let re = cache.update(&e);
+                if !re {
+                    println!("{:?}", cache);
+                }
                 if e.get_all_piece_length() != 0 {
-                    error!("Udp Parse Result Piece Length: {}", e.get_all_piece_length());
+                    error!(
+                        "Udp Parse Result Piece Length: {}, info_hash: {:?}, quad: {:?}",
+                        e.get_all_piece_length(),
+                        e.info_hash,
+                        e.info1
+                    );
                 }
             }
         }
@@ -144,7 +158,7 @@ fn main() {
                 // println!("------------ {:?}", packet);
                 if let Ok(s) = packet {
                     match s.info.transport {
-                        parser::TransportProtocol::Tcp { seq : _} => {
+                        parser::TransportProtocol::Tcp { seq: _ } => {
                             tcp_tx.send(s).await.unwrap();
                         }
                         parser::TransportProtocol::Udp => {

@@ -3,6 +3,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::SystemTime;
 
 use aho_corasick::AhoCorasick;
+use bytes::Bytes;
 use etherparse::SlicedPacket;
 use pcap::stream::{PacketCodec, PacketStream};
 use pcap::{Active, Capture, Device, Error, Packet};
@@ -170,7 +171,8 @@ pub async fn start_new_stream(device: Device) -> PacketStream<Active, SimpleDump
     let cap = Capture::from_device(device)
         .unwrap()
         .buffer_size(1024 * 1024 * 64)
-        // .immediate_mode(true)
+        .snaplen(65535 * 64)
+        .immediate_mode(false)
         .open()
         .unwrap()
         .setnonblock()
@@ -222,7 +224,6 @@ impl TcpFlowParser {
             let mut it =
                 memchr::memmem::find_iter(p.payload.as_slice(), &BITTORRENT_HANDSHAKE_HEADER);
             if let Some(_) = it.next() {
-                println!("{:?}", p.payload);
                 let mut peer_flow = TcpPeerFlow::new(flow);
                 let re = peer_flow.get_result_from_buf(&self.ac);
                 info!("create interested tcp flow {:?}", peer_flow.info1);
@@ -323,14 +324,156 @@ impl UdpFlowParser {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BittorrentFlowInf {
+    pub info_hash: Bytes,
+    pub peer_client1: String,
+    pub peer_client2: String,
+    pub file_piece_number: u32,
+}
+
+impl BittorrentFlowInf {
+    pub fn new(info_hash: Bytes) -> Self {
+        Self {
+            info_hash,
+            peer_client1: "".to_string(),
+            peer_client2: "".to_string(),
+            file_piece_number: 0u32,
+        }
+    }
+
+    pub fn update_by_flow(&mut self, flow: &BittorrentFlow) -> bool {
+        let mut flag = false;
+        for p in flow.messages1.iter() {
+            match p {
+                crate::flow::BitTorrentMessage::HandShake { info_hash, peer_id } => {
+                    flag = true;
+                    self.info_hash = info_hash.clone();
+                }
+                crate::flow::BitTorrentMessage::Extended { data } => {
+                    let bencode = bende::decode::<bende::Value>(&data[1..]);
+                    if let Ok(ben) = bencode {
+                        if let bende::Value::Dict(dict) = ben {
+                            if let Some(v) = dict.get("v") {
+                                if let bende::Value::Text(s) = v {
+                                    if let Ok(s) = String::from_utf8(s.clone()) {
+                                        self.peer_client1 = s;
+                                        flag = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for p in flow.messages2.iter() {
+            match p {
+                crate::flow::BitTorrentMessage::HandShake { info_hash, peer_id } => {
+                    self.info_hash = info_hash.clone();
+                    flag = true;
+                }
+                crate::flow::BitTorrentMessage::Extended { data } => {
+                    let bencode = bende::decode::<bende::Value>(&data[1..]);
+                    if let Ok(ben) = bencode {
+                        if let bende::Value::Dict(dict) = ben {
+                            if let Some(v) = dict.get("v") {
+                                if let bende::Value::Text(s) = v {
+                                    if let Ok(s) = String::from_utf8(s.clone()) {
+                                        self.peer_client2 = s;
+                                        flag = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        flag
+    }
+
+    pub fn update_by_flow_rev(&mut self, flow: &BittorrentFlow) -> bool {
+        let mut flag = false;
+        for p in flow.messages2.iter() {
+            match p {
+                crate::flow::BitTorrentMessage::HandShake { info_hash, peer_id } => {
+                    self.info_hash = info_hash.clone();
+                    flag = true;
+                }
+                crate::flow::BitTorrentMessage::Extended { data } => {
+                    let bencode = bende::decode::<bende::Value>(&data[1..]);
+                    if let Ok(ben) = bencode {
+                        if let bende::Value::Dict(dict) = ben {
+                            if let Some(v) = dict.get("v") {
+                                if let bende::Value::Text(s) = v {
+                                    if let Ok(s) = String::from_utf8(s.clone()) {
+                                        self.peer_client1 = s;
+                                        flag = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for p in flow.messages1.iter() {
+            match p {
+                crate::flow::BitTorrentMessage::HandShake { info_hash, peer_id } => {
+                    self.info_hash = info_hash.clone();
+                    flag = true;
+                }
+                crate::flow::BitTorrentMessage::Extended { data } => {
+                    let bencode = bende::decode::<bende::Value>(&data[1..]);
+                    if let Ok(ben) = bencode {
+                        if let bende::Value::Dict(dict) = ben {
+                            if let Some(v) = dict.get("v") {
+                                if let bende::Value::Text(s) = v {
+                                    if let Ok(s) = String::from_utf8(s.clone()) {
+                                        self.peer_client2 = s;
+                                        flag = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        flag
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct BittorrentFlowInfCache {
-    pub map: HashMap<(InetAddr, u16, InetAddr, u16), BittorrentFlow>,
+    pub map: HashMap<(InetAddr, u16, InetAddr, u16), BittorrentFlowInf>,
 }
 
 impl BittorrentFlowInfCache {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+        }
+    }
+
+    pub fn update(&mut self, flow: &BittorrentFlow) -> bool {
+        if let Some(e) = self.map.get_mut(&flow.info1.get_src_dst_tuple()) {
+            return e.update_by_flow(flow);
+        } else if let Some(e) = self.map.get_mut(&flow.info1.get_dst_src_tuple()) {
+            return e.update_by_flow_rev(flow);
+        } else {
+            let mut inf = BittorrentFlowInf::new(Bytes::new());
+            inf.update_by_flow(flow);
+            let re = inf.info_hash.len() != 0; // if there is info_hash then return true
+            if re {
+                self.map.insert(flow.info1.get_src_dst_tuple(), inf);
+            }
+            return re;
         }
     }
 }
